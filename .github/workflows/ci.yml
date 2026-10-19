@@ -1,5 +1,5 @@
 
-name: Microservices CI
+name: Microservices DevSecOps CI
 
 on:
   push:
@@ -9,16 +9,78 @@ on:
       - "user-service/**"
       - "course-service/**"
       - "enrollment-service/**"
+      - "compose.yaml"
       - ".github/workflows/**"
   pull_request:
     branches:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  validate:
-    name: Validate Python services
+  security-checks:
+    name: Code and Dependency Security
     runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install service dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r user-service/requirements.txt
+          pip install -r course-service/requirements.txt
+          pip install -r enrollment-service/requirements.txt
+
+      - name: Check Python syntax
+        run: |
+          python -m compileall -q user-service
+          python -m compileall -q course-service
+          python -m compileall -q enrollment-service
+
+      - name: Install Semgrep
+        run: python -m pip install semgrep
+
+      - name: Run Semgrep SAST
+        run: |
+          semgrep scan \
+            --config p/python \
+            --error \
+            user-service course-service enrollment-service
+
+      - name: Scan for leaked secrets with Gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan dependencies with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: "0"
+
+  build-scan-push:
+    name: Build, Scan and Publish Images
+    needs: security-checks
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
 
     strategy:
       fail-fast: false
@@ -28,29 +90,46 @@ jobs:
           - course-service
           - enrollment-service
 
-    defaults:
-      run:
-        working-directory: ${{ matrix.service }}
-
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
+      - name: Set image name
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          IMAGE_NAME=$(printf '%s' \
+            "ghcr.io/${GITHUB_REPOSITORY_OWNER}/course-app-${{ matrix.service }}" \
+            | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
 
-      - name: Check Python syntax
-        run: python -m compileall -q .
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t "${IMAGE_NAME}:${GITHUB_SHA}" \
+            "./${{ matrix.service }}"
 
-      - name: Run Semgrep SAST
-        uses: semgrep/semgrep-action@v1
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
-          config: p/python
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          scan-type: image
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
 
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker push "${IMAGE_NAME}:${GITHUB_SHA}"
+          docker tag "${IMAGE_NAME}:${GITHUB_SHA}" "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:latest"
