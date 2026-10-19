@@ -1,0 +1,35 @@
+
+services:
+  user-service:
+    build:
+      context: ./user-service
+    ports:
+      - "8001:8001"
+    networks:
+      - course-network
+
+  course-service:
+    build:
+      context: ./course-service
+    ports:
+      - "8002:8002"
+    networks:
+      - course-network
+
+  enrollment-service:
+    build:
+      context: ./enrollment-service
+    ports:
+      - "8003:8003"
+    environment:
+      USER_SERVICE_URL: http://user-service:8001
+      COURSE_SERVICE_URL: http://course-service:8002
+    depends_on:
+      - user-service
+      - course-service
+    networks:
+      - course-network
+
+networks:
+  course-network:
+    driver: bridge
