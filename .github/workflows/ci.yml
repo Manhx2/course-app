@@ -48,3 +48,9 @@ jobs:
 
       - name: Check Python syntax
         run: python -m compileall -q .
+
+      - name: Run Semgrep SAST
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: p/python
+
